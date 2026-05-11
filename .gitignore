@@ -1,0 +1,26 @@
+# Environnement Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Données sensibles
+settings.json
+*.txt.bak
+
+# Fichier token (ne jamais committer)
+tocken*.txt
+*huggingface*.txt
+
+# Dossiers générés
+.tmp/
+transcripts/
+
+# FFmpeg local (binaires lourds)
+ffmpeg-shared/
+ffmpeg/
+
+# IDE
+.idea/
+.vscode/
