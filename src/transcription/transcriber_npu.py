@@ -50,6 +50,8 @@ class TranscriberNPU:
             elif "progress" in msg:
                 pct = 25.0 + float(msg["progress"]) * 0.24
                 self._on_progress(("progress", pct))
+            elif "segment_count" in msg:
+                self._on_progress(("segment_count", int(msg["segment_count"])))
             elif "segments" in msg:
                 segments = msg["segments"]
             elif "error" in msg:
@@ -62,6 +64,4 @@ class TranscriberNPU:
 
         label = "NPU" if self._device == "npu" else "PyTorch CPU"
         self._on_progress(("log", f"Transcription {label} terminee : {len(segments)} segments."))
-        for i, _ in enumerate(segments):
-            self._on_progress(("segment_count", i + 1))
         return segments
