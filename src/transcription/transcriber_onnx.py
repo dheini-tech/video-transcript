@@ -1,4 +1,10 @@
-"""DirectML transcriber — Xenova Whisper ONNX float32 via DmlExecutionProvider."""
+"""DirectML transcriber — Xenova Whisper ONNX float32 via DmlExecutionProvider.
+
+KV-cache note: decoder_model_merged.onnx from Xenova requires use_cache_branch=False
+for initialization, which triggers a Reshape bug in onnxruntime-directml 1.24.4
+(If-node shape evaluation fails on the False branch). KV-cache is disabled until
+onnxruntime-directml is updated. Decoder runs without cache (O(n^2) per chunk).
+"""
 import os
 from pathlib import Path
 from typing import Callable
@@ -34,6 +40,7 @@ class TranscriberONNX:
         self._on_progress = on_progress or (lambda msg: None)
         self._encoder = None
         self._decoder = None
+        self._cpu_decoder = None
         self._fe = None
         self._tok = None
         self._sot = None
@@ -55,53 +62,51 @@ class TranscriberONNX:
         hf_pt   = _HF_PT_MAP.get(self._model_name, "openai/whisper-small")
 
         self._on_progress(("log", f"Téléchargement modèle ONNX '{hf_onnx}'…"))
-        onnx_cache = Path(__file__).parent.parent.parent / ".onnx_cache" / hf_onnx.replace("/", "--")
-        onnx_cache.mkdir(parents=True, exist_ok=True)
+        cache = Path(__file__).parent.parent.parent / ".onnx_cache" / hf_onnx.replace("/", "--")
+        cache.mkdir(parents=True, exist_ok=True)
         local_dir = snapshot_download(
             repo_id=hf_onnx,
-            local_dir=str(onnx_cache),
+            local_dir=str(cache),
+            # Skip merged decoder — incompatible with onnxruntime-directml 1.24.4
             ignore_patterns=["*merged*", "*fp16*", "*.msgpack", "*.safetensors", "flax_*", "tf_*"],
         )
-        encoder_path = os.path.join(local_dir, "onnx", "encoder_model.onnx")
-        decoder_path = os.path.join(local_dir, "onnx", "decoder_model.onnx")
 
         opts = ort.SessionOptions()
         opts.log_severity_level = 3
         providers = ["DmlExecutionProvider", "CPUExecutionProvider"]
 
-        self._on_progress(("log", "Chargement encoder ONNX…"))
-        self._encoder = ort.InferenceSession(encoder_path, sess_options=opts, providers=providers)
-        self._on_progress(("log", "Chargement decoder ONNX…"))
-        self._decoder = ort.InferenceSession(decoder_path, sess_options=opts, providers=providers)
+        enc_path = os.path.join(local_dir, "onnx", "encoder_model.onnx")
+        dec_path = os.path.join(local_dir, "onnx", "decoder_model.onnx")
 
-        active = self._encoder.get_providers()[0]
-        self._on_progress(("log", f"Modèle ONNX chargé ({active})."))
+        self._on_progress(("log", "Chargement encoder (DirectML)…"))
+        self._encoder = ort.InferenceSession(enc_path, sess_options=opts, providers=providers)
+        enc_provider = self._encoder.get_providers()[0]
 
-        # Detect input names dynamically (robust to any Whisper ONNX layout)
+        self._on_progress(("log", "Chargement decoder (DirectML)…"))
+        self._decoder = ort.InferenceSession(dec_path, sess_options=opts, providers=providers)
+        dec_provider = self._decoder.get_providers()[0]
+
+        # CPU-only backup decoder for when DML crashes mid-sequence
+        if dec_provider == "DmlExecutionProvider":
+            cpu_opts = ort.SessionOptions()
+            cpu_opts.log_severity_level = 3
+            self._cpu_decoder = ort.InferenceSession(
+                dec_path, sess_options=cpu_opts, providers=["CPUExecutionProvider"]
+            )
+
+        self._on_progress(("log", f"Modèle chargé — encoder: {enc_provider}, decoder: {dec_provider}."))
+
+        # Detect input names dynamically
         self._enc_input_name = self._encoder.get_inputs()[0].name
-
-        dec_inputs = {inp.name: inp for inp in self._decoder.get_inputs()}
-        # Xenova names: "input_ids", "encoder_hidden_states"
+        dec_inputs = {i.name: i for i in self._decoder.get_inputs()}
         if "input_ids" in dec_inputs:
             self._dec_input_ids_name  = "input_ids"
             self._dec_enc_hidden_name = "encoder_hidden_states"
         else:
-            # AMD-style fallback: "x" (tokens), "xa" (encoder out)
-            names = list(dec_inputs.keys())
-            id_name = next((n for n in names if dec_inputs[n].type == "tensor(int64)"), names[0])
-            enc_name = next((n for n in names if n != id_name), names[1])
-            self._dec_input_ids_name  = id_name
-            self._dec_enc_hidden_name = enc_name
-
-        # CPU-only decoder as fallback when DML crashes mid-inference
-        self._cpu_decoder = None
-        if self._decoder.get_providers()[0] == "DmlExecutionProvider":
-            import onnxruntime as ort
-            opts2 = ort.SessionOptions()
-            opts2.log_severity_level = 3
-            self._cpu_decoder = ort.InferenceSession(
-                decoder_path, sess_options=opts2, providers=["CPUExecutionProvider"]
-            )
+            names  = list(dec_inputs.keys())
+            id_n   = next((n for n in names if dec_inputs[n].type == "tensor(int64)"), names[0])
+            self._dec_input_ids_name  = id_n
+            self._dec_enc_hidden_name = next(n for n in names if n != id_n)
 
         self._fe  = WhisperFeatureExtractor.from_pretrained(hf_pt)
         self._tok = WhisperTokenizer.from_pretrained(hf_pt)
@@ -145,15 +150,15 @@ class TranscriberONNX:
                 }
                 if self._dml_dec_failed:
                     logits = self._cpu_decoder.run(None, feed)[0]
-                elif self._cpu_decoder is None:
-                    logits = self._decoder.run(None, feed)[0]
                 else:
                     try:
                         logits = self._decoder.run(None, feed)[0]
                     except (RuntimeError, UnicodeDecodeError):
                         self._dml_dec_failed = True
-                        self._on_progress(("log", "DirectML decoder instable, bascule CPU."))
-                        logits = self._cpu_decoder.run(None, feed)[0]
+                        self._on_progress(("log", "DirectML decoder instable — bascule CPU."))
+                        dec = self._cpu_decoder or self._decoder
+                        logits = dec.run(None, feed)[0]
+
                 next_tok = int(np.argmax(logits[0, -1]))
                 if next_tok == self._eos:
                     break
