@@ -16,6 +16,8 @@ tocken*.txt
 # Dossiers générés
 .tmp/
 transcripts/
+.onnx_cache/
+.npu_cache/
 
 # FFmpeg local (binaires lourds)
 ffmpeg-shared/

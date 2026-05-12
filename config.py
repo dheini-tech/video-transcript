@@ -41,6 +41,9 @@ WHISPER_VAD_FILTER  = True                # ignore les silences → gain 20-50 %
 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large-v2", "large-v3"]
 
+WHISPER_ENGINES = ["CPU", "Rapide (PyTorch CPU)", "DirectML (GPU intégré)", "NPU (Ryzen AI)"]
+WHISPER_ENGINE_DEFAULT = "CPU"
+
 WHISPER_LANGUAGES = [
     "Auto",
     "fr — Français",
