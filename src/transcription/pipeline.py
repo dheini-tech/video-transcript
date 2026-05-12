@@ -13,8 +13,10 @@ from src.output.formatter import TranscriptFormatter
 
 
 class TranscriptionPipeline:
-    def __init__(self, model: str, hf_token: str, engine: str = "cpu", on_progress: Callable = None):
+    def __init__(self, model: str, hf_token: str, engine: str = "cpu",
+                 diarize: bool = True, on_progress: Callable = None):
         self._on_progress = on_progress or (lambda msg: None)
+        self._diarize = diarize
         if engine == "directml":
             self._transcriber = TranscriberONNX(model_name=model, on_progress=on_progress)
         elif engine == "npu":
@@ -23,7 +25,7 @@ class TranscriptionPipeline:
             self._transcriber = TranscriberNPU(model_name=model, device="cpu", on_progress=on_progress)
         else:
             self._transcriber = Transcriber(model_name=model, on_progress=on_progress)
-        self._diarizer = Diarizer(hf_token=hf_token, on_progress=on_progress)
+        self._diarizer = Diarizer(hf_token=hf_token, on_progress=on_progress) if diarize else None
         self._formatter = TranscriptFormatter()
 
     def run(self, source_type: str, source: str, language: str | None = None) -> Path:
@@ -37,11 +39,15 @@ class TranscriptionPipeline:
             self._on_progress(("step", 2))
             segments = self._transcriber.transcribe(audio_path, language=language)
 
-            self._on_progress(("step", 3))
-            speakers = self._diarizer.diarize(audio_path)
+            if self._diarize:
+                self._on_progress(("step", 3))
+                speakers = self._diarizer.diarize(audio_path)
+                merged = self._merge_speaker_labels(segments, speakers)
+            else:
+                self._on_progress(("log", "Diarisation désactivée — locuteur unique."))
+                merged = [{**seg, "speaker": "LOCUTEUR"} for seg in segments]
 
             self._on_progress(("step", 4))
-            merged = self._merge_speaker_labels(segments, speakers)
             transcript_path = self._save(merged, audio_path.stem)
             self._on_progress(("transcript", self._formatter.to_string(merged)))
             return transcript_path

@@ -131,6 +131,17 @@ class App:
         ttk.Button(frame, text="Sauvegarder", command=self._save_settings).grid(
             row=1, column=6, pady=(8, 0))
 
+        # Row 2: diarization toggle
+        self._diarize_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frame, text="Diarisation (identification des locuteurs)",
+                        variable=self._diarize_var,
+                        command=self._on_diarize_toggle).grid(
+            row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self._hf_token_warning = ttk.Label(frame, text="⚠ Token requis pour la diarisation",
+                                           foreground="orange")
+        self._hf_token_warning.grid(row=2, column=4, columnspan=3, sticky="w", pady=(6, 0))
+        self._hf_token_warning.grid_remove()
+
         self._on_engine_change()
 
     def _on_engine_change(self, *_):
@@ -138,6 +149,12 @@ class App:
             self._cpu_cores_frame.grid()
         else:
             self._cpu_cores_frame.grid_remove()
+
+    def _on_diarize_toggle(self):
+        if self._diarize_var.get() and not self._hf_token_var.get().strip():
+            self._hf_token_warning.grid()
+        else:
+            self._hf_token_warning.grid_remove()
 
     def _save_settings(self):
         self._settings.hf_token = self._hf_token_var.get().strip()
@@ -198,8 +215,9 @@ class App:
             return
 
         hf_token = self._hf_token_var.get().strip()
-        if not hf_token:
-            messagebox.showwarning("Token manquant", "Veuillez saisir votre token HuggingFace pour la diarisation.")
+        diarize = self._diarize_var.get()
+        if diarize and not hf_token:
+            messagebox.showwarning("Token manquant", "Veuillez saisir votre token HuggingFace pour la diarisation,\nou désactivez la diarisation.")
             return
 
         self._log.clear()
@@ -221,18 +239,19 @@ class App:
 
         threading.Thread(
             target=self._run_pipeline,
-            args=(source_type, source, self._model_var.get(), hf_token, language, engine, cpu_cores),
+            args=(source_type, source, self._model_var.get(), hf_token, language, engine, cpu_cores, diarize),
             daemon=True,
         ).start()
         self._poll_queue()
 
     def _run_pipeline(self, source_type: str, source: str, model: str, hf_token: str,
-                      language: str | None, engine: str = "cpu", cpu_cores: int | None = None):
+                      language: str | None, engine: str = "cpu", cpu_cores: int | None = None,
+                      diarize: bool = True):
         import config
         if engine == "cpu" and cpu_cores is not None:
             config.WHISPER_CPU_THREADS = cpu_cores
         pipeline = TranscriptionPipeline(
-            model=model, hf_token=hf_token, engine=engine, on_progress=self._queue.put,
+            model=model, hf_token=hf_token, engine=engine, diarize=diarize, on_progress=self._queue.put,
         )
         try:
             path = pipeline.run(source_type=source_type, source=source, language=language)
