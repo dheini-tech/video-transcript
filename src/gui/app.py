@@ -5,7 +5,10 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from config import SUPPORTED_MEDIA_EXTENSIONS, WHISPER_MODEL_DEFAULT, WHISPER_MODELS, WHISPER_LANGUAGES
+from config import (
+    SUPPORTED_MEDIA_EXTENSIONS, WHISPER_MODEL_DEFAULT, WHISPER_MODELS,
+    WHISPER_LANGUAGES, WHISPER_ENGINES, WHISPER_ENGINE_DEFAULT,
+)
 from src.gui.widgets import LogWidget
 from src.settings import Settings
 from src.transcription.pipeline import TranscriptionPipeline
@@ -90,6 +93,7 @@ class App:
         frame = ttk.LabelFrame(self.root, text="Options", padding=10)
         frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
 
+        # Row 0: model, language, engine
         ttk.Label(frame, text="Modèle Whisper :").grid(row=0, column=0, sticky="w")
         self._model_var = tk.StringVar(value=WHISPER_MODEL_DEFAULT)
         ttk.Combobox(frame, textvariable=self._model_var, values=WHISPER_MODELS,
@@ -100,12 +104,40 @@ class App:
         ttk.Combobox(frame, textvariable=self._lang_var, values=WHISPER_LANGUAGES,
                      state="readonly", width=14).grid(row=0, column=3, sticky="w", padx=(5, 20))
 
-        ttk.Label(frame, text="Token HuggingFace :").grid(row=0, column=4, sticky="w")
-        self._hf_token_var = tk.StringVar(value=self._settings.hf_token)
-        ttk.Entry(frame, textvariable=self._hf_token_var, show="*", width=32).grid(row=0, column=5, sticky="ew", padx=5)
-        frame.columnconfigure(5, weight=1)
+        ttk.Label(frame, text="Moteur :").grid(row=0, column=4, sticky="w")
+        self._engine_var = tk.StringVar(value=WHISPER_ENGINE_DEFAULT)
+        ttk.Combobox(frame, textvariable=self._engine_var, values=WHISPER_ENGINES,
+                     state="readonly", width=22,
+                     postcommand=lambda: None).grid(row=0, column=5, sticky="w", padx=(5, 20))
+        self._engine_var.trace_add("write", self._on_engine_change)
 
-        ttk.Button(frame, text="Sauvegarder", command=self._save_settings).grid(row=0, column=6)
+        # CPU cores spinbox (hidden when DirectML selected)
+        _total = os.cpu_count() or 4
+        self._cpu_cores_var = tk.IntVar(value=max(1, _total - 4))
+        self._cpu_cores_frame = ttk.Frame(frame)
+        self._cpu_cores_frame.grid(row=0, column=6, sticky="w")
+        ttk.Label(self._cpu_cores_frame, text="Cœurs CPU :").grid(row=0, column=0, sticky="w")
+        ttk.Spinbox(self._cpu_cores_frame, from_=1, to=_total,
+                    textvariable=self._cpu_cores_var, width=4).grid(row=0, column=1, padx=(4, 2))
+        ttk.Label(self._cpu_cores_frame, text=f"/{_total} disponibles",
+                  foreground="gray").grid(row=0, column=2, sticky="w")
+
+        # Row 1: HF token
+        ttk.Label(frame, text="Token HuggingFace :").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self._hf_token_var = tk.StringVar(value=self._settings.hf_token)
+        ttk.Entry(frame, textvariable=self._hf_token_var, show="*", width=40).grid(
+            row=1, column=1, columnspan=5, sticky="ew", padx=5, pady=(8, 0))
+        frame.columnconfigure(5, weight=1)
+        ttk.Button(frame, text="Sauvegarder", command=self._save_settings).grid(
+            row=1, column=6, pady=(8, 0))
+
+        self._on_engine_change()
+
+    def _on_engine_change(self, *_):
+        if self._engine_var.get() == "CPU":
+            self._cpu_cores_frame.grid()
+        else:
+            self._cpu_cores_frame.grid_remove()
 
     def _save_settings(self):
         self._settings.hf_token = self._hf_token_var.get().strip()
@@ -176,15 +208,32 @@ class App:
         lang = self._lang_var.get()
         language = None if lang == "Auto" else lang.split(" — ")[0]
 
+        engine_label = self._engine_var.get()
+        if "DirectML" in engine_label:
+            engine = "directml"
+        elif "NPU" in engine_label:
+            engine = "npu"
+        elif "Rapide" in engine_label:
+            engine = "rapide"
+        else:
+            engine = "cpu"
+        cpu_cores = self._cpu_cores_var.get() if engine == "cpu" else None
+
         threading.Thread(
             target=self._run_pipeline,
-            args=(source_type, source, self._model_var.get(), hf_token, language),
+            args=(source_type, source, self._model_var.get(), hf_token, language, engine, cpu_cores),
             daemon=True,
         ).start()
         self._poll_queue()
 
-    def _run_pipeline(self, source_type: str, source: str, model: str, hf_token: str, language: str | None):
-        pipeline = TranscriptionPipeline(model=model, hf_token=hf_token, on_progress=self._queue.put)
+    def _run_pipeline(self, source_type: str, source: str, model: str, hf_token: str,
+                      language: str | None, engine: str = "cpu", cpu_cores: int | None = None):
+        import config
+        if engine == "cpu" and cpu_cores is not None:
+            config.WHISPER_CPU_THREADS = cpu_cores
+        pipeline = TranscriptionPipeline(
+            model=model, hf_token=hf_token, engine=engine, on_progress=self._queue.put,
+        )
         try:
             path = pipeline.run(source_type=source_type, source=source, language=language)
             self._queue.put(("done", str(path)))

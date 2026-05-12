@@ -6,14 +6,23 @@ from config import TRANSCRIPTS_DIR, TEMP_DIR
 from src.media.downloader import YouTubeDownloader
 from src.media.extractor import AudioExtractor
 from src.transcription.transcriber import Transcriber
+from src.transcription.transcriber_onnx import TranscriberONNX
+from src.transcription.transcriber_npu import TranscriberNPU
 from src.transcription.diarizer import Diarizer
 from src.output.formatter import TranscriptFormatter
 
 
 class TranscriptionPipeline:
-    def __init__(self, model: str, hf_token: str, on_progress: Callable = None):
+    def __init__(self, model: str, hf_token: str, engine: str = "cpu", on_progress: Callable = None):
         self._on_progress = on_progress or (lambda msg: None)
-        self._transcriber = Transcriber(model_name=model, on_progress=on_progress)
+        if engine == "directml":
+            self._transcriber = TranscriberONNX(model_name=model, on_progress=on_progress)
+        elif engine == "npu":
+            self._transcriber = TranscriberNPU(model_name=model, device="npu", on_progress=on_progress)
+        elif engine == "rapide":
+            self._transcriber = TranscriberNPU(model_name=model, device="cpu", on_progress=on_progress)
+        else:
+            self._transcriber = Transcriber(model_name=model, on_progress=on_progress)
         self._diarizer = Diarizer(hf_token=hf_token, on_progress=on_progress)
         self._formatter = TranscriptFormatter()
 
