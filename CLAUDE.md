@@ -36,7 +36,7 @@ transcripts/                     # Fichiers .txt générés (gitignore)
 - `faster-whisper` — transcription CPU (CTranslate2)
 - `pyannote.audio` — diarisation (identification locuteurs)
 - `onnxruntime-directml 1.24.4` — accélération GPU AMD/Intel via DirectX 12
-- `optimum` — export ONNX de Whisper (en cours d'intégration)
+- `optimum 2.1.0` — installé mais `optimum.onnxruntime` retiré dans cette version (non utilisé)
 - `yt-dlp` — téléchargement YouTube
 - `soundfile` — chargement audio (évite la dépendance torchcodec)
 
@@ -65,11 +65,25 @@ Après tout `pip install optimum*`, toujours vérifier et réinstaller :
 
 ## Moteurs de transcription
 
-| Moteur | Classe | Backend | Vitesse estimée |
-|--------|--------|---------|-----------------|
-| CPU | `Transcriber` | faster-whisper / CTranslate2 | ~60s (small, fichier test) |
-| DirectML | `TranscriberONNX` | onnxruntime-directml | en cours de test |
-| NPU (futur) | à implémenter | AMD Ryzen AI / VitisAI | ~15–25s estimé |
+Benchmarks mesurés sur ~4 min d'audio, modèle `small`, fichier WAV 16kHz mono.
+
+| Moteur (GUI) | Classe | Backend | Durée mesurée | Notes |
+|---|---|---|---|---|
+| CPU | `Transcriber` | faster-whisper / CTranslate2 | ~60s | Beam search, meilleure qualité |
+| Rapide (PyTorch CPU) | `TranscriberNPU` device=cpu | npu_worker.py → PyTorch HuggingFace | ~41s | Via conda ryzen-ai-1.7.1 |
+| NPU (Ryzen AI) | `TranscriberNPU` device=npu | npu_worker.py → VitisAI ONNX AMD | ~50s (cache chaud) | ~600s premier run (compilation) |
+| DirectML (GPU intégré) | `TranscriberONNX` | onnxruntime-directml + Xenova ONNX | ~180s | Pas de KV-cache → plus lent que CPU |
+
+### Notes DirectML
+- Utilise les modèles `Xenova/whisper-*` (ONNX float32 standard, pas les modèles AMD NPU quantifiés)
+- Modèles stockés dans `.onnx_cache/` (gitignore)
+- Sans KV-cache : O(n²) tokens → lent. Amélioration possible avec `decoder_model_merged.onnx`
+- Le decoder bascule automatiquement en CPU si DML plante en cours de séquence
+
+### Notes NPU
+- Utilise `amd/whisper-*-onnx-npu` (UINT8 quantifié pour VitisAI, incompatible DML)
+- Premier run : ~10 min de compilation NPU → cache dans `.npu_cache/`
+- Python subprocess via `C:\Programme_DHI\MiniConda\envs\ryzen-ai-1.7.1\python.exe`
 
 ## Pipeline de traitement (4 étapes)
 
